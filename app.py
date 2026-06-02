@@ -33,8 +33,12 @@ ORDER_SEQUENCE = [
 # Session State Initialisierung
 if 'sim_running' not in st.session_state:
     st.session_state.sim_running = False
+if 'sim_mode' not in st.session_state:
+    st.session_state.sim_mode = "Push"  # "Push" oder "Pull"
 if 'orders' not in st.session_state:
     st.session_state.orders = {}  # Dict: slot_nr (1-3) -> order
+if 'production_orders' not in st.session_state:
+    st.session_state.production_orders = []  # Produktionsaufträge für Station 1 (nur Pull)
 if 'last_order_time' not in st.session_state:
     st.session_state.last_order_time = 0
 if 'next_interval' not in st.session_state:
@@ -68,6 +72,7 @@ def reset_simulation():
     init_db()
     st.session_state.sim_running = False
     st.session_state.orders = {}
+    st.session_state.production_orders = []
     st.session_state.last_order_time = 0
     st.session_state.order_sequence_index = 0
     st.rerun()
@@ -150,6 +155,7 @@ if st.session_state.sim_running:
     st.sidebar.success("🟢 Simulation läuft")
 else:
     st.sidebar.error("🔴 Simulation gestoppt")
+st.sidebar.caption(f"Modus: **{st.session_state.sim_mode}**")
 
 # ==========================================
 # 4. DASHBOARD (MIT STEUERUNG)
@@ -160,6 +166,20 @@ if view == "📊 Dashboard":
     # --- STEUERKONSOLE ---
     with st.container():
         st.subheader("🛠️ Simulation-Steuerung")
+
+        # Modus-Auswahl (Push / Pull) – nur änderbar wenn Simulation gestoppt
+        selected_mode = st.radio(
+            "Steuerungsmodus:",
+            ["Push", "Pull"],
+            index=0 if st.session_state.sim_mode == "Push" else 1,
+            horizontal=True,
+            disabled=st.session_state.sim_running,
+            help="Push: Produktion treibt den Materialfluss. "
+                 "Pull: Das DC löst per Knopfdruck Produktionsaufträge für Station 1 aus."
+        )
+        if not st.session_state.sim_running:
+            st.session_state.sim_mode = selected_mode
+
         c_start, c_stop, c_reset = st.columns(3)
 
         if not st.session_state.sim_running:
@@ -310,6 +330,23 @@ elif view == "📦 DC":
                     conn.close()
                     del st.session_state.orders[slot_number]
                     st.rerun()
+
+                # --- PULL-MODUS: Produktionsauftrag an Station 1 senden ---
+                if st.session_state.sim_mode == "Pull":
+                    if order.get("po_sent", False):
+                        st.button("✅ Produktionsauftrag gesendet",
+                                  key=f"po_{order['id']}", use_container_width=True, disabled=True)
+                    else:
+                        if st.button("📤 Produktionsauftrag senden",
+                                     key=f"po_{order['id']}", use_container_width=True):
+                            st.session_state.production_orders.append({
+                                "po_id": random.randint(100000, 999999),
+                                "type": order["type"],
+                                "source_order_id": order["id"],
+                                "sent_at": datetime.datetime.now().strftime("%H:%M:%S")
+                            })
+                            st.session_state.orders[slot_number]["po_sent"] = True
+                            st.rerun()
             else:
                 st.markdown(
                     '<div style="border:2px dashed #ccc; border-top:none; padding:50px; '
@@ -347,6 +384,31 @@ elif view == "🏭 Station 1":
     st.title("🏭 Station 1 (Start)")
     st.info(
         "**Aufgabe:** ID einchecken, Brief auswählen, stempeln, ID auf Umschlag schreiben, an Station 2 weitergeben.")
+
+    # --- PULL-MODUS: Produktionsauftrags-Liste vom DC ---
+    if st.session_state.sim_mode == "Pull":
+        st.subheader("📋 Produktionsaufträge (vom DC)")
+        if st.session_state.production_orders:
+            for po in st.session_state.production_orders:
+                p = PRODUCT_TYPES[po["type"]]
+                c_info, c_btn = st.columns([4, 1])
+                with c_info:
+                    st.markdown(f"""
+                        <div style="background-color:{p['color']}; padding:10px; border:2px solid #333;
+                             border-radius:8px; color:black; margin-bottom:5px;">
+                            <b>Typ {po['type']}</b> &nbsp;|&nbsp; ✉️ {p['env']} &nbsp;|&nbsp; 📄 {p['paper']}
+                            <span style="float:right; color:#555;">⏱ eingegangen {po['sent_at']}</span>
+                        </div>
+                    """, unsafe_allow_html=True)
+                with c_btn:
+                    if st.button("✅ Erledigt", key=f"po_done_{po['po_id']}", use_container_width=True):
+                        st.session_state.production_orders = [
+                            x for x in st.session_state.production_orders if x['po_id'] != po['po_id']
+                        ]
+                        st.rerun()
+        else:
+            st.caption("Keine offenen Produktionsaufträge. Warten auf Signal vom DC ...")
+        st.markdown("---")
 
     id_in = st.text_input("ID vergeben:", key="s1_id").strip().upper()
     if st.button("Starten", type="primary"):
