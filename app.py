@@ -147,7 +147,7 @@ except:
 
 st.sidebar.markdown("---")
 view = st.sidebar.radio("Navigation:",
-                        ["📊 Dashboard", "🏭 Station 1", "🏭 Station 2", "🏭 Station 3", "🏭 Station 4", "📦 DC"])
+                        ["📊 Dashboard", "🏭 Station A", "🏭 Station B", "🏭 Station C", "🏭 Station D", "📦 DC"])
 
 # Statusanzeige klein in der Sidebar
 st.sidebar.markdown("---")
@@ -429,7 +429,8 @@ elif view == "🏭 Station A":
             st.warning("ID eingeben!")
 
 elif view in ["🏭 Station B", "🏭 Station C", "🏭 Station D"]:
-    s_id = int(view[-1])
+    letter = view[-1]                       # "B", "C" oder "D"
+    s_id = {"B": 2, "C": 3, "D": 4}[letter] # interne Stations-ID für die DB
     st.title(view)
 
     station_tasks = {
