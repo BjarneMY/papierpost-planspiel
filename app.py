@@ -18,10 +18,10 @@ DC_STATION_ID = 5
 ORDER_LIFETIME = 90  # Sekunden bis Auftrag verfällt
 
 PRODUCT_TYPES = {
-    "A": {"env": "Weißer Umschlag", "paper": "Weißes Blatt", "color": "#F0F2F6"},
-    "B": {"env": "Roter Umschlag", "paper": "Grünes Blatt", "color": "#FFDADA"},
-    "C": {"env": "Blauer Umschlag", "paper": "Rotes Blatt", "color": "#D1E9FF"},
-    "D": {"env": "Weißer Umschlag", "paper": "Blaues Blatt", "color": "#E1FFD1"}
+    "A": {"env": "Weißer Umschlag", "paper": "Weißes Blatt", "color": "#F8F9FA"},
+    "B": {"env": "Weißer Umschlag", "paper": "Rotes Blatt", "color": "#FFE5E5"},
+    "C": {"env": "Roter Umschlag", "paper": "Weißes Blatt", "color": "#FFD6D6"},
+    "D": {"env": "Roter Umschlag", "paper": "Rotes Blatt", "color": "#FFB3B3"}
 }
 
 ORDER_SEQUENCE = [
@@ -380,10 +380,10 @@ elif view == "📦 DC":
 # ==========================================
 # 6. STATIONEN
 # ==========================================
-elif view == "🏭 Station 1":
-    st.title("🏭 Station 1 (Start)")
+elif view == "🏭 Station A":
+    st.title("🏭 Station A (Start)")
     st.info(
-        "**Aufgabe:** ID einchecken, Brief auswählen, stempeln, ID auf Umschlag schreiben, an Station 2 weitergeben.")
+        "**Aufgabe:** ID einchecken, Brief auswählen, stempeln, Produktart kennzeichnen, ID auf Umschlag schreiben, an Station B weitergeben.")
 
     # --- PULL-MODUS: Produktionsauftrags-Liste vom DC ---
     if st.session_state.sim_mode == "Pull":
@@ -428,13 +428,13 @@ elif view == "🏭 Station 1":
         else:
             st.warning("ID eingeben!")
 
-elif view in ["🏭 Station 2", "🏭 Station 3", "🏭 Station 4"]:
+elif view in ["🏭 Station B", "🏭 Station C", "🏭 Station D"]:
     s_id = int(view[-1])
     st.title(view)
 
     station_tasks = {
-        2: "**Aufgabe:** ID einchecken, Papier auswählen, falten, in Umschlag stecken, an Station 3 weitergeben.",
-        3: "**Aufgabe:** ID einchecken, Absenderadresse auf Umschlag schreiben, Umschlag zukleben, an Station 4 weitergeben.",
+        2: "**Aufgabe:** ID einchecken, Papier auswählen, falten, in Umschlag stecken, an Station C weitergeben.",
+        3: "**Aufgabe:** ID einchecken, Absenderadresse auf Umschlag schreiben, Umschlag zukleben, an Station D weitergeben.",
         4: "**Aufgabe:** ID einchecken, Brief versiegeln, ans Distribution Center weitergeben."
     }
     st.info(station_tasks.get(s_id))
