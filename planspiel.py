@@ -13,7 +13,7 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================
 st.set_page_config(page_title="Papierpost AG | Leitstand", layout="wide")
 
-DB_FILE = 'planspiel_pro_v3_data.db'
+DB_FILE = os.environ.get("PLANSPIEL_DB", "planspiel_data.db")
 DC_STATION_ID = 5
 ORDER_LIFETIME = 90  # Sekunden bis Auftrag verfällt
 
