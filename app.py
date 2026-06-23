@@ -30,28 +30,17 @@ ORDER_SEQUENCE = [
     "C", "B", "D", "B", "A"
 ]
 
-# Session State Initialisierung
-if 'sim_running' not in st.session_state:
-    st.session_state.sim_running = False
-if 'sim_mode' not in st.session_state:
-    st.session_state.sim_mode = "Push"  # "Push" oder "Pull"
-if 'orders' not in st.session_state:
-    st.session_state.orders = {}  # Dict: slot_nr (1-3) -> order
-if 'production_orders' not in st.session_state:
-    st.session_state.production_orders = []  # Produktionsaufträge für Station 1 (nur Pull)
-if 'last_order_time' not in st.session_state:
-    st.session_state.last_order_time = 0
-if 'next_interval' not in st.session_state:
-    st.session_state.next_interval = random.randint(25, 35)
-if 'order_sequence_index' not in st.session_state:
-    st.session_state.order_sequence_index = 0
+# HINWEIS: Der GETEILTE Simulationszustand (Modus, läuft/gestoppt, Marktaufträge,
+# Produktionsaufträge, Timer) liegt jetzt in der DB – NICHT mehr in st.session_state.
+# Nur rein lokale UI-Dinge dürfen weiter in session_state stehen.
 
 
 # ==========================================
 # 2. DATENBANK LOGIK
 # ==========================================
 def get_connection():
-    return sqlite3.connect(DB_FILE)
+    # timeout hilft gegen "database is locked" bei mehreren gleichzeitigen Nutzern
+    return sqlite3.connect(DB_FILE, timeout=10)
 
 
 def init_db():
@@ -62,76 +51,134 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT, station_id INTEGER, timestamp TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS orders_log 
                  (order_id INTEGER PRIMARY KEY, product_type TEXT, created_at TIMESTAMP, served_at TIMESTAMP, status TEXT)''')
+
+    # --- NEU: geteilter Zustand ---
+    c.execute('''CREATE TABLE IF NOT EXISTS sim_state (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS market_orders 
+                 (slot INTEGER PRIMARY KEY, order_id INTEGER, product_type TEXT, 
+                  created_at REAL, po_sent INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS production_orders 
+                 (po_id INTEGER PRIMARY KEY, product_type TEXT, source_order_id INTEGER, sent_at TEXT)''')
+
+    # Standardwerte nur anlegen, falls noch nicht vorhanden
+    defaults = {
+        'sim_running': '0',
+        'sim_mode': 'Push',
+        'last_order_time': '0',
+        'next_interval': str(random.randint(25, 35)),
+        'order_sequence_index': '0',
+    }
+    for k, v in defaults.items():
+        c.execute("INSERT OR IGNORE INTO sim_state (key, value) VALUES (?, ?)", (k, v))
+
     conn.commit()
     conn.close()
+
+
+# --- Helfer für den geteilten Zustand ---
+def get_state(key, default=None, cast=str):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT value FROM sim_state WHERE key=?", (key,))
+    row = c.fetchone()
+    conn.close()
+    if row is None:
+        return default
+    return cast(row[0])
+
+
+def set_state(key, value):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO sim_state (key, value) VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+    conn.close()
+
+
+def is_running():
+    return get_state('sim_running', '0') == '1'
+
+
+def get_mode():
+    return get_state('sim_mode', 'Push')
+
+
+def load_market_orders():
+    """Marktaufträge als Dict slot -> order aus der DB laden."""
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM market_orders", conn)
+    conn.close()
+    orders = {}
+    for _, r in df.iterrows():
+        orders[int(r['slot'])] = {
+            "type": r['product_type'],
+            "id": int(r['order_id']),
+            "created_at": float(r['created_at']),
+            "po_sent": bool(r['po_sent']),
+        }
+    return orders
 
 
 def reset_simulation():
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
     init_db()
-    st.session_state.sim_running = False
-    st.session_state.orders = {}
-    st.session_state.production_orders = []
-    st.session_state.last_order_time = 0
-    st.session_state.order_sequence_index = 0
     st.rerun()
 
 
 def generate_order_logic():
-    # Freien Slot finden (1-3)
-    occupied = set(st.session_state.orders.keys())
+    conn = get_connection()
+    c = conn.cursor()
+
+    # Freien Slot finden (1-3) aus der DB
+    c.execute("SELECT slot FROM market_orders")
+    occupied = {row[0] for row in c.fetchall()}
     free_slots = [s for s in [1, 2, 3] if s not in occupied]
     if not free_slots:
+        conn.close()
         return  # Alle Slots belegt
 
     slot = random.choice(free_slots)
     new_id = random.randint(10000, 99999)
 
     # Nächsten Auftragstyp aus der Sequenz holen (mit Wiederholung von vorne)
-    idx = st.session_state.order_sequence_index % len(ORDER_SEQUENCE)
-    p_key = ORDER_SEQUENCE[idx]
-    st.session_state.order_sequence_index += 1
+    raw_idx = get_state('order_sequence_index', '0', int)
+    p_key = ORDER_SEQUENCE[raw_idx % len(ORDER_SEQUENCE)]
+    set_state('order_sequence_index', raw_idx + 1)
 
     now = datetime.datetime.now()
-    conn = get_connection()
-    c = conn.cursor()
+    created_epoch = time.time()
+
     c.execute("INSERT INTO orders_log (order_id, product_type, created_at, status) VALUES (?, ?, ?, ?)",
               (new_id, p_key, now, 'offen'))
+    c.execute("INSERT INTO market_orders (slot, order_id, product_type, created_at, po_sent) VALUES (?, ?, ?, ?, 0)",
+              (slot, new_id, p_key, created_epoch))
     conn.commit()
     conn.close()
-
-    st.session_state.orders[slot] = {
-        "type": p_key,
-        "timestamp": now.strftime("%H:%M:%S"),
-        "id": new_id,
-        "created_at": time.time()
-    }
 
 
 def update_market_orders():
     now = time.time()
 
     # Abgelaufene Aufträge entfernen (Slots bleiben leer – kein Nachrücken)
-    expired_slots = [
-        slot for slot, order in st.session_state.orders.items()
-        if now - order["created_at"] >= ORDER_LIFETIME
-    ]
-    for slot in expired_slots:
-        order = st.session_state.orders.pop(slot)
-        conn = get_connection()
-        c = conn.cursor()
-        c.execute("UPDATE orders_log SET status = 'verfallen' WHERE order_id = ?", (order['id'],))
-        conn.commit()
-        conn.close()
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT slot, order_id, created_at FROM market_orders")
+    for slot, order_id, created_at in c.fetchall():
+        if now - created_at >= ORDER_LIFETIME:
+            c.execute("DELETE FROM market_orders WHERE slot=?", (slot,))
+            c.execute("UPDATE orders_log SET status='verfallen' WHERE order_id=?", (order_id,))
+    conn.commit()
+    conn.close()
 
     # Neuen Auftrag generieren
-    if st.session_state.sim_running:
-        if st.session_state.last_order_time == 0 or (
-                now - st.session_state.last_order_time >= st.session_state.next_interval):
+    if is_running():
+        last = get_state('last_order_time', '0', float)
+        interval = get_state('next_interval', '30', int)
+        if last == 0 or (now - last >= interval):
             generate_order_logic()
-            st.session_state.last_order_time = now
-            st.session_state.next_interval = random.randint(30, 40)
+            set_state('last_order_time', now)
+            set_state('next_interval', random.randint(30, 40))
 
 
 init_db()
@@ -142,26 +189,29 @@ init_db()
 st.sidebar.title("Papierpost AG")
 try:
     st.sidebar.image(Image.open("Logo_Papierpost.png"), use_container_width=True)
-except:
+except Exception:
     st.sidebar.warning("Logo fehlt")
 
 st.sidebar.markdown("---")
 view = st.sidebar.radio("Navigation:",
                         ["📊 Dashboard", "🏭 Station A", "🏭 Station B", "🏭 Station C", "🏭 Station D", "📦 DC"])
 
-# Statusanzeige klein in der Sidebar
+# Statusanzeige klein in der Sidebar (jetzt aus der DB → für alle gleich)
 st.sidebar.markdown("---")
-if st.session_state.sim_running:
+if is_running():
     st.sidebar.success("🟢 Simulation läuft")
 else:
     st.sidebar.error("🔴 Simulation gestoppt")
-st.sidebar.caption(f"Modus: **{st.session_state.sim_mode}**")
+st.sidebar.caption(f"Modus: **{get_mode()}**")
 
 # ==========================================
 # 4. DASHBOARD (MIT STEUERUNG)
 # ==========================================
 if view == "📊 Dashboard":
     st.title("📊 Leitstand & KPI Dashboard")
+
+    running = is_running()
+    mode = get_mode()
 
     # --- STEUERKONSOLE ---
     with st.container():
@@ -171,26 +221,28 @@ if view == "📊 Dashboard":
         selected_mode = st.radio(
             "Steuerungsmodus:",
             ["Push", "Pull"],
-            index=0 if st.session_state.sim_mode == "Push" else 1,
+            index=0 if mode == "Push" else 1,
             horizontal=True,
-            disabled=st.session_state.sim_running,
+            disabled=running,
             help="Push: Produktion treibt den Materialfluss. "
                  "Pull: Das DC löst per Knopfdruck Produktionsaufträge für Station 1 aus."
         )
-        if not st.session_state.sim_running:
-            st.session_state.sim_mode = selected_mode
+        # Modus in die DB schreiben (für ALLE sichtbar), nur wenn gestoppt und geändert
+        if not running and selected_mode != mode:
+            set_state('sim_mode', selected_mode)
+            st.rerun()
 
         c_start, c_stop, c_reset = st.columns(3)
 
-        if not st.session_state.sim_running:
+        if not running:
             if c_start.button("▶️ START", type="primary", use_container_width=True):
-                st.session_state.sim_running = True
-                st.session_state.last_order_time = 0
+                set_state('sim_running', '1')
+                set_state('last_order_time', '0')
                 update_market_orders()
                 st.rerun()
         else:
             if c_stop.button("🛑 STOPP", use_container_width=True):
-                st.session_state.sim_running = False
+                set_state('sim_running', '0')
                 st.rerun()
 
         if c_reset.button("🗑️ RESET (Alle Daten löschen)", use_container_width=True):
@@ -270,6 +322,9 @@ elif view == "📦 DC":
     cols = st.columns(3)
     now_ts = time.time()
 
+    orders = load_market_orders()
+    mode = get_mode()
+
     for slot_number in [1, 2, 3]:
         col_index = slot_number - 1  # Slot 1 → links, Slot 2 → mitte, Slot 3 → rechts
         with cols[col_index]:
@@ -279,8 +334,8 @@ elif view == "📦 DC":
                 f'color:white; padding:5px; border-radius:5px 5px 0 0;">SLOT {slot_number}</div>',
                 unsafe_allow_html=True)
 
-            if slot_number in st.session_state.orders:
-                order = st.session_state.orders[slot_number]
+            if slot_number in orders:
+                order = orders[slot_number]
                 p = PRODUCT_TYPES[order['type']]
                 elapsed = now_ts - order["created_at"]
                 remaining = max(0, ORDER_LIFETIME - elapsed)
@@ -326,26 +381,29 @@ elif view == "📦 DC":
                     c = conn.cursor()
                     c.execute("UPDATE orders_log SET status='bedient', served_at=? WHERE order_id=?",
                               (datetime.datetime.now(), order['id']))
+                    c.execute("DELETE FROM market_orders WHERE slot=?", (slot_number,))
                     conn.commit()
                     conn.close()
-                    del st.session_state.orders[slot_number]
                     st.rerun()
 
                 # --- PULL-MODUS: Produktionsauftrag an Station 1 senden ---
-                if st.session_state.sim_mode == "Pull":
+                if mode == "Pull":
                     if order.get("po_sent", False):
                         st.button("✅ Produktionsauftrag gesendet",
                                   key=f"po_{order['id']}", use_container_width=True, disabled=True)
                     else:
                         if st.button("📤 Produktionsauftrag senden",
                                      key=f"po_{order['id']}", use_container_width=True):
-                            st.session_state.production_orders.append({
-                                "po_id": random.randint(100000, 999999),
-                                "type": order["type"],
-                                "source_order_id": order["id"],
-                                "sent_at": datetime.datetime.now().strftime("%H:%M:%S")
-                            })
-                            st.session_state.orders[slot_number]["po_sent"] = True
+                            conn = get_connection()
+                            c = conn.cursor()
+                            c.execute(
+                                "INSERT INTO production_orders (po_id, product_type, source_order_id, sent_at) "
+                                "VALUES (?, ?, ?, ?)",
+                                (random.randint(100000, 999999), order["type"], order["id"],
+                                 datetime.datetime.now().strftime("%H:%M:%S")))
+                            c.execute("UPDATE market_orders SET po_sent=1 WHERE slot=?", (slot_number,))
+                            conn.commit()
+                            conn.close()
                             st.rerun()
             else:
                 st.markdown(
@@ -385,26 +443,35 @@ elif view == "🏭 Station A":
     st.info(
         "**Aufgabe:** ID einchecken, Brief auswählen, stempeln, Produktart kennzeichnen, ID auf Umschlag schreiben, an Station B weitergeben.")
 
-    # --- PULL-MODUS: Produktionsauftrags-Liste vom DC ---
-    if st.session_state.sim_mode == "Pull":
+    # --- PULL-MODUS: Produktionsauftrags-Liste vom DC (aus der DB) ---
+    if get_mode() == "Pull":
+        # Auto-Refresh, damit neue Produktionsaufträge ohne manuelles Neuladen erscheinen
+        st_autorefresh(interval=10000, limit=None, key="stationA_autorefresh")
+
         st.subheader("📋 Produktionsaufträge (vom DC)")
-        if st.session_state.production_orders:
-            for po in st.session_state.production_orders:
-                p = PRODUCT_TYPES[po["type"]]
+        conn = get_connection()
+        pos_df = pd.read_sql_query("SELECT * FROM production_orders ORDER BY po_id", conn)
+        conn.close()
+
+        if not pos_df.empty:
+            for _, po in pos_df.iterrows():
+                p = PRODUCT_TYPES[po["product_type"]]
                 c_info, c_btn = st.columns([4, 1])
                 with c_info:
                     st.markdown(f"""
                         <div style="background-color:{p['color']}; padding:10px; border:2px solid #333;
                              border-radius:8px; color:black; margin-bottom:5px;">
-                            <b>Typ {po['type']}</b> &nbsp;|&nbsp; ✉️ {p['env']} &nbsp;|&nbsp; 📄 {p['paper']}
+                            <b>Typ {po['product_type']}</b> &nbsp;|&nbsp; ✉️ {p['env']} &nbsp;|&nbsp; 📄 {p['paper']}
                             <span style="float:right; color:#555;">⏱ eingegangen {po['sent_at']}</span>
                         </div>
                     """, unsafe_allow_html=True)
                 with c_btn:
-                    if st.button("✅ Erledigt", key=f"po_done_{po['po_id']}", use_container_width=True):
-                        st.session_state.production_orders = [
-                            x for x in st.session_state.production_orders if x['po_id'] != po['po_id']
-                        ]
+                    if st.button("✅ Erledigt", key=f"po_done_{int(po['po_id'])}", use_container_width=True):
+                        conn = get_connection()
+                        c = conn.cursor()
+                        c.execute("DELETE FROM production_orders WHERE po_id=?", (int(po['po_id']),))
+                        conn.commit()
+                        conn.close()
                         st.rerun()
         else:
             st.caption("Keine offenen Produktionsaufträge. Warten auf Signal vom DC ...")
@@ -421,7 +488,7 @@ elif view == "🏭 Station A":
                 c.execute("INSERT INTO process_log (item_id, station_id, timestamp) VALUES (?,1,?)", (id_in, now))
                 conn.commit()
                 st.success(f"✅ {id_in} gestartet!")
-            except:
+            except Exception:
                 st.error("⚠️ Diese ID existiert bereits!")
             finally:
                 conn.close()
